@@ -1,27 +1,44 @@
-name: Node.js CI Demo
+name: Node.js CI/CD Pipeline
 
-on: [push]
+on:
+  push:
+    branches: [main]
 
 jobs:
-  test-project:
+  build-test-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Runner로 내 소스 코드 다운로드
       - name: Check out repository code
         uses: actions/checkout@v6
 
-      # Runner에 Node.js 설치
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
-      # package.json에 적힌 외부 라이브러리들 설치
       - name: Install dependencies
         run: npm ci
 
-      # Jest 테스트 실행
       - name: Run Jest tests
         run: npm test
+
+      - name: Configure SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
+          chmod 400 ~/.ssh/id_rsa
+
+      - name: Copy files to EC2 via SCP
+        run: |
+          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
+            ./* ubuntu@${{ secrets.AWS_PUBLIC_IP }}:/home/ubuntu/test-ci/
+
+      - name: Deploy and Restart PM2 via SSH
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ secrets.AWS_PUBLIC_IP }} "
+            cd /home/ubuntu/test-ci &&
+            npm ci --production &&
+            pm2 restart ./dist/main.js --name 'test-ci' || pm2 start ./dist/main.js --name 'test-ci'
+          "
