@@ -33,7 +33,7 @@ jobs:
       - name: Copy files to EC2 via SCP
         run: |
           scp -r -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
-            ./* ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/test-ci/
+            . ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/test-ci/
 
       - name: Deploy and Restart PM2 via SSH
         run: |
