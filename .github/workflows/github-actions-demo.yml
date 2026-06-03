@@ -26,24 +26,25 @@ jobs:
         run: npm test
 
       # ==================== [ 2부: CD 단계 ] ====================
-      # 1단계: 가상 컴퓨터에 SSH Key 세팅 및 무한 대기를 막기 위한 known_hosts 사전 등록
+      # 1단계: SSH 키 설정 및 개행 문자 깨짐 방지 처리 + known_hosts 등록
       - name: Configure SSH Key and Known Hosts
         env:
           EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.AWS_SSH_CREDENTIALS }}" | tr -d '\r' > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+
           ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
 
-      # 2단계: 안전하게 검증된 방식으로 소스 코드를 EC2 서버로 복사
+      # 2단계: 프로젝트 파일 전체를 EC2 서버로 복사
       - name: Copy files to EC2 via SCP
         env:
           EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
           scp -r ./* ec2-user@$EC2_HOST:/home/ec2-user/test-ci/
 
-      # 3단계: EC2 서버에 원격 접속하여 PM2 서버 재시작
+      # 3단계: EC2 서버 원격 접속 및 PM2 실행
       - name: Deploy and Restart PM2 via SSH
         env:
           EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
