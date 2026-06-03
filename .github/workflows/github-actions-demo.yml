@@ -33,12 +33,12 @@ jobs:
       - name: Copy files to EC2 via SCP
         run: |
           scp -r -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
-            ./* ubuntu@${{ secrets.AWS_PUBLIC_IP }}:/home/ubuntu/test-ci/
+            ./* ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/test-ci/
 
       - name: Deploy and Restart PM2 via SSH
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ secrets.AWS_PUBLIC_IP }} "
-            cd /home/ubuntu/test-ci &&
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@${{ secrets.AWS_PUBLIC_IP }} "
+            cd /home/ec2-user/test-ci &&
             npm ci --production &&
             pm2 restart ./dist/main.js --name 'test-ci' || pm2 start ./dist/main.js --name 'test-ci'
           "
