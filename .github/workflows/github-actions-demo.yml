@@ -9,8 +9,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==================== [ 1부: CI 단계 ] ====================
       - name: Check out repository code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -24,20 +25,30 @@ jobs:
       - name: Run Jest tests
         run: npm test
 
-      - name: Configure SSH Key
+      # ==================== [ 2부: CD 단계 ] ====================
+      # 1단계: 가상 컴퓨터에 SSH Key 세팅 및 무한 대기를 막기 위한 known_hosts 사전 등록
+      - name: Configure SSH Key and Known Hosts
+        env:
+          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
-          chmod 400 ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
 
+      # 2단계: 안전하게 검증된 방식으로 소스 코드를 EC2 서버로 복사
       - name: Copy files to EC2 via SCP
+        env:
+          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
-          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
-            . ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/test-ci/
+          scp -r ./* ec2-user@$EC2_HOST:/home/ec2-user/test-ci/
 
+      # 3단계: EC2 서버에 원격 접속하여 PM2 서버 재시작
       - name: Deploy and Restart PM2 via SSH
+        env:
+          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@${{ secrets.AWS_PUBLIC_IP }} "
+          ssh ec2-user@$EC2_HOST "
             cd /home/ec2-user/test-ci &&
             npm ci --production &&
             pm2 restart ./dist/main.js --name 'test-ci' || pm2 start ./dist/main.js --name 'test-ci'
