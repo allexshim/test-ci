@@ -26,31 +26,23 @@ jobs:
         run: npm test
 
       # ==================== [ 2부: CD 단계 ] ====================
-      # 1단계: printf를 사용하여 비밀키의 줄바꿈과 포맷을 완벽하게 보존 + known_hosts 등록
-      - name: Configure SSH Key and Known Hosts
-        env:
-          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
+      - name: Create SSH key
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.AWS_PUBLIC_IP }} >> ~/.ssh/known_hosts
 
-          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
-
-      # 2단계: 타임아웃 설정을 추가하여 무한 대기를 차단하고 소스 코드 전송
-      - name: Copy files to EC2 via SCP
-        env:
-          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
+      - name: Copy files to server
         run: |
-          scp -o ConnectTimeout=10 -o BatchMode=yes -r ./* ec2-user@$EC2_HOST:/home/ec2-user/test-ci/
+          rsync -az --exclude='.git' \
+                    --exclude='node_modules' \
+                    ./ ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/app/
 
-      # 3단계: 원격 접속 후 PM2 실행
-      - name: Deploy and Restart PM2 via SSH
-        env:
-          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
+      - name: Install dependencies & restart PM2
         run: |
-          ssh -o ConnectTimeout=10 -o BatchMode=yes ec2-user@$EC2_HOST "
-            cd /home/ec2-user/test-ci &&
-            npm ci --production &&
-            pm2 restart ./dist/main.js --name 'test-ci' || pm2 start ./dist/main.js --name 'test-ci'
+          ssh ec2-user@${{ secrets.AWS_PUBLIC_IP }} "
+            cd /home/ec2-user/app &&
+            npm ci --omit=dev &&
+            pm2 restart app || pm2 start npm --name app -- start
           "
