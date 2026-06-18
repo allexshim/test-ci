@@ -64,31 +64,18 @@ jobs:
         env:
           IMAGE: ${{ needs.build-and-push.outputs.image }}
           ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
           EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          ssh ec2-user@"$EC2_HOST" bash << EOF
-          set -euo pipefail
-
-          export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
-          export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
-          export AWS_DEFAULT_REGION="$AWS_REGION"
-          IMAGE="$IMAGE"
-          ECR_REGISTRY="$ECR_REGISTRY"
-
-          aws ecr get-login-password --region "\$AWS_DEFAULT_REGION" | \
-            docker login --username AWS --password-stdin "\$ECR_REGISTRY"
-
-          docker pull "\$IMAGE"
-
-          docker stop app 2>/dev/null || true
-          docker rm app 2>/dev/null || true
-
-          docker run -d \
-            --name app \
-            --restart unless-stopped \
-            -p 3000:3000 \
-            "\$IMAGE"
-          EOF
+          ssh ec2-user@$EC2_HOST "
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+            docker pull $IMAGE
+            docker stop app || true
+            docker rm app || true
+            docker run -d \
+              --name app \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              $IMAGE
+            docker image prune -a -f
+          "
