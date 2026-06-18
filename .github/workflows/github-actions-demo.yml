@@ -69,15 +69,15 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
-          ssh ec2-user@"$EC2_HOST" bash -s \
-            "$IMAGE" "$ECR_REGISTRY" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_REGION" << 'EOF'
-          set -euo pipefail
+          ssh ec2-user@"$EC2_HOST" \
+            AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+            AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+            AWS_DEFAULT_REGION="$AWS_REGION" \
+            IMAGE="$IMAGE" \
+            ECR_REGISTRY="$ECR_REGISTRY" \
+            'bash -s' << 'EOF'
 
-          IMAGE=$1
-          ECR_REGISTRY=$2
-          export AWS_ACCESS_KEY_ID=$3
-          export AWS_SECRET_ACCESS_KEY=$4
-          export AWS_DEFAULT_REGION=$5
+          set -euo pipefail
 
           aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | \
             docker login --username AWS --password-stdin "$ECR_REGISTRY"
