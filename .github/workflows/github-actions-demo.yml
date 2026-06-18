@@ -77,5 +77,4 @@ jobs:
               --restart unless-stopped \
               -p 3000:3000 \
               $IMAGE
-            docker image prune -a -f
           "
