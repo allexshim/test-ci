@@ -5,27 +5,54 @@ on:
     branches: [main]
 
 jobs:
-  build-test-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.uri }}
+      registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
-      # ==================== [ 1부: CI 단계 ] ====================
+      # ==================== [ CI 단계 ] ====================
       - name: Check out repository code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Run Jest tests
-        run: npm test
+      - name: Set image URI
+        id: image
+        run: echo "uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-      # ==================== [ 2부: CD 단계 ] ====================
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push multi-platform Docker image to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+
+  # ==================== [ CD 단계 ] ====================
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Create SSH key
         run: |
           mkdir -p ~/.ssh
@@ -33,16 +60,36 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.AWS_PUBLIC_IP }} >> ~/.ssh/known_hosts
 
-      - name: Copy files to server
+      - name: Deploy Docker container on EC2
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
         run: |
-          rsync -az --exclude='.git' \
-                    --exclude='node_modules' \
-                    ./ ec2-user@${{ secrets.AWS_PUBLIC_IP }}:/home/ec2-user/app/
+          ssh ec2-user@"$EC2_HOST" bash -s \
+            "$IMAGE" "$ECR_REGISTRY" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_REGION" << 'EOF'
+          set -euo pipefail
 
-      - name: Install dependencies & restart PM2
-        run: |
-          ssh ec2-user@${{ secrets.AWS_PUBLIC_IP }} "
-            cd /home/ec2-user/app &&
-            npm ci --omit=dev &&
-            pm2 restart app || pm2 start npm --name app -- start
-          "
+          IMAGE=$1
+          ECR_REGISTRY=$2
+          export AWS_ACCESS_KEY_ID=$3
+          export AWS_SECRET_ACCESS_KEY=$4
+          export AWS_DEFAULT_REGION=$5
+
+          aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+          docker pull "$IMAGE"
+
+          docker stop app 2>/dev/null || true
+          docker rm app 2>/dev/null || true
+
+          docker run -d \
+            --name app \
+            --restart unless-stopped \
+            -p 3000:3000 \
+            "$IMAGE"
+          EOF
