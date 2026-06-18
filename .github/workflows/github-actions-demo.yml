@@ -3,16 +3,17 @@ name: Node.js CI/CD Pipeline
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # CD 단계에서 이미지 레지스트리 주소를 참조할 수 있도록 전역 아웃풋 설정
     outputs:
-      image: ${{ steps.image.outputs.uri }}
       registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
-      # ==================== [ CI 단계 ] ====================
       - name: Check out repository code
         uses: actions/checkout@v4
 
@@ -27,69 +28,84 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set image URI
-        id: image
-        run: echo "uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
+      - name: Set up QEMU (멀티 플랫폼 빌드 필수 에뮬레이터)
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx (최신 캐시 및 빌드 엔진)
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push multi-platform Docker image to ECR
-        uses: docker/build-push-action@v6
+      - name: Build and push Docker image to ECR
+        uses: docker/build-push-action@v6 # 최신 v6 버전 적용
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # 무거운 날짜 계산 대신, 깃 커밋 해시(sha)와 latest를 태그로 깔끔하게 관리
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+          # 💡 최신 공식 빌드 액션은 내부 캐시(cache-from, cache-to)를 지원하므로 buildx 스크립트를 따로 짤 필요가 없습니다.
 
-  # ==================== [ CD 단계 ] ====================
   deploy:
     needs: build-and-push
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Create SSH key
+      - name: Check out repository code (설계도면 확보용)
+        uses: actions/checkout@v4
+
+      - name: Create SSH Setup
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_CREDENTIALS }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.AWS_PUBLIC_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Docker container on EC2
+      # 🌟 [개선 포인트] 컴포즈 설계를 함께 쓰고 싶다면, 여기서 .env와 함께 서류들을 먼저 던집니다.
+      - name: Create and Copy Deploy Environment to EC2
         env:
-          IMAGE: ${{ needs.build-and-push.outputs.image }}
-          ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          EC2_HOST: ${{ secrets.AWS_PUBLIC_IP }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
         run: |
-          ssh ec2-user@"$EC2_HOST" \
-            AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-            AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-            AWS_DEFAULT_REGION="$AWS_REGION" \
-            IMAGE="$IMAGE" \
-            ECR_REGISTRY="$ECR_REGISTRY" \
-            'bash -s' << 'EOF'
+          # EC2에 주입할 환경변수 명세서 작성
+          cat << ENV_EOF > .deploy.env
+          ECR_REGISTRY=${{ needs.build-and-push.outputs.registry }}
+          ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG=${{ github.sha }}
+          AWS_REGION=${{ secrets.AWS_REGION }}
+          ENV_EOF
 
+          # 환경변수 파일 배달
+          scp -i ~/.ssh/id_rsa .deploy.env $EC2_USERNAME@$EC2_HOST:/home/$EC2_USERNAME/.deploy.env
+
+          # (만약 docker-compose.yml을 쓰신다면 아래 주석을 해제하여 같이 던지세요)
+          # scp -i ~/.ssh/id_rsa docker-compose.yml $EC2_USERNAME@$EC2_HOST:/home/$EC2_USERNAME/docker-compose.yml
+
+      - name: Execute Deployment on EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+        run: |
+          # 싱글쿼트('EOF')를 사용하여 변수 해석의 권한을 온전히 EC2에게 위임합니다.
+          ssh -i ~/.ssh/id_rsa $EC2_USERNAME@$EC2_HOST 'bash -s' << 'EOF'
           set -euo pipefail
 
-          aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | \
+          # 배달된 환경변수 로드
+          if [ -f ~/.deploy.env ]; then
+            export $(cat ~/.deploy.env | xargs)
+          fi
+
+          # AWS CLI가 설치되어 있다고 가정하고 ECR 로그인 진행
+          aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-          docker pull "$IMAGE"
+          docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker stop sample-server 2>/dev/null || true
+          docker rm sample-server 2>/dev/null || true
+          docker run -d --name sample-server --restart unless-stopped -p 3000:3000 "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          docker stop app 2>/dev/null || true
-          docker rm app 2>/dev/null || true
-
-          docker run -d \
-            --name app \
-            --restart unless-stopped \
-            -p 3000:3000 \
-            "$IMAGE"
+          # 안 쓰이는 예전 이미지 및 찌꺼기 청소
+          docker image prune -f
+          rm -f ~/.deploy.env
           EOF
